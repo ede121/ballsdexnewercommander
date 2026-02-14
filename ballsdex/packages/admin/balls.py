@@ -409,7 +409,7 @@ async def balls_reset(
     )
 
 
-@balls.command(name="count")
+@balls.command(name="counts")
 @checks.has_permissions("bd_models.view_ballinstance")
 async def balls_count(ctx: commands.Context[BallsDexBot], *, flags: BallsCountFlags):
     """
