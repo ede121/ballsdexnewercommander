@@ -42,12 +42,13 @@ class SimpleCheckView(View):
         self.stop()
 
 
-class Core(commands.Cog):
+class Core(commands.GroupCog):
     """
     Core commands of BallsDex bot
     """
 
     def __init__(self, bot: "BallsDexBot"):
+        super().__init__()
         self.bot = bot
         # in-memory battle sessions: session_id -> dict
         self._battle_sessions: dict[str, dict] = {}
@@ -251,59 +252,62 @@ class BattleSessionView(View):
         """
         await ctx.send("Pong")
 
-    battle_group = app_commands.Group(name="battle", description="Battle commands")
+    @commands.hybrid_group(name="battle", description="Battle commands")
+    async def battle_group(self, ctx: commands.Context):
+        """
+        Battle commands for PvP battles
+        """
+        await ctx.send_help(ctx.command)
 
     @battle_group.command(name="start", description="Start a battle session against another player")
-    @app_commands.describe(limit="Max countryballs per player (1-3)", opponent="Player to fight")
-    async def slash_battle_start(self, interaction: discord.Interaction, limit: int = 3, opponent: discord.Member | None = None):
+    async def slash_battle_start(self, ctx: commands.Context, limit: int = 3, opponent: discord.Member | None = None):
         if limit < 1 or limit > 3:
-            await interaction.response.send_message("Limit must be between 1 and 3.", ephemeral=True)
+            await ctx.send("Limit must be between 1 and 3.", ephemeral=True)
             return
 
         if opponent is None:
-            await interaction.response.send_message("You must specify an opponent.", ephemeral=True)
+            await ctx.send("You must specify an opponent.", ephemeral=True)
             return
 
         session_id = self._new_session_id()
         self._battle_sessions[session_id] = {
-            "host": interaction.user.id,
+            "host": ctx.author.id,
             "opponent": opponent.id,
             "limit": limit,
             "team_a": [],
             "team_b": [],
-            "confirmed": {interaction.user.id: False, opponent.id: False},
-            "channel": interaction.channel_id,
+            "confirmed": {ctx.author.id: False, opponent.id: False},
+            "channel": ctx.channel.id,
         }
 
-        await interaction.response.send_message(
-            f"Battle session `{session_id}` started between {interaction.user.mention} and {opponent.mention}.\n"
+        await ctx.send(
+            f"Battle session `{session_id}` started between {ctx.author.mention} and {opponent.mention}.\n"
             f"Each player may add up to {limit} countryballs with `/battle add {session_id} <instance_id>`.",
             ephemeral=False,
         )
 
     @battle_group.command(name="add", description="Add a countryball instance to an existing battle session")
-    @app_commands.describe(session="Battle session id", instance_id="BallInstance id to add")
-    async def slash_battle_add(self, interaction: discord.Interaction, session: str, instance_id: int):
+    async def slash_battle_add(self, ctx: commands.Context, session: str, instance_id: int):
         sess = self._battle_sessions.get(session)
         if not sess:
-            await interaction.response.send_message("Session not found.", ephemeral=True)
+            await ctx.send("Session not found.", ephemeral=True)
             return
 
-        uid = interaction.user.id
+        uid = ctx.author.id
         if uid not in (sess["host"], sess["opponent"]):
-            await interaction.response.send_message("You are not part of this session.", ephemeral=True)
+            await ctx.send("You are not part of this session.", ephemeral=True)
             return
 
         # fetch BallInstance and check ownership
         try:
             inst = await sync_to_async(BallInstance.objects.get)(pk=instance_id)
         except Exception:
-            await interaction.response.send_message("BallInstance not found.", ephemeral=True)
+            await ctx.send("BallInstance not found.", ephemeral=True)
             return
 
-        player = await self._get_player(interaction.user)
-        if not player or inst.player.discord_id != interaction.user.id:
-            await interaction.response.send_message("You do not own that countryball instance.", ephemeral=True)
+        player = await self._get_player(ctx.author)
+        if not player or inst.player.discord_id != ctx.author.id:
+            await ctx.send("You do not own that countryball instance.", ephemeral=True)
             return
 
         # determine which team to add to
@@ -313,42 +317,41 @@ class BattleSessionView(View):
             team = sess["team_b"]
 
         if len(team) >= sess["limit"]:
-            await interaction.response.send_message(f"Your team already has the maximum of {sess['limit']} balls.", ephemeral=True)
+            await ctx.send(f"Your team already has the maximum of {sess['limit']} balls.", ephemeral=True)
             return
 
         if instance_id in sess["team_a"] or instance_id in sess["team_b"]:
-            await interaction.response.send_message("This instance is already added to the session.", ephemeral=True)
+            await ctx.send("This instance is already added to the session.", ephemeral=True)
             return
 
         team.append(instance_id)
         sess["confirmed"][sess["host"]] = False
         sess["confirmed"][sess["opponent"]] = False
 
-        await interaction.response.send_message(f"Added instance #{instance_id} to your team in session `{session}`.", ephemeral=True)
+        await ctx.send(f"Added instance #{instance_id} to your team in session `{session}`.", ephemeral=True)
 
     @battle_group.command(name="confirm", description="Confirm your readiness for the battle session")
-    @app_commands.describe(session="Battle session id")
-    async def slash_battle_confirm(self, interaction: discord.Interaction, session: str):
+    async def slash_battle_confirm(self, ctx: commands.Context, session: str):
         sess = self._battle_sessions.get(session)
         if not sess:
-            await interaction.response.send_message("Session not found.", ephemeral=True)
+            await ctx.send("Session not found.", ephemeral=True)
             return
 
-        uid = interaction.user.id
+        uid = ctx.author.id
         if uid not in (sess["host"], sess["opponent"]):
-            await interaction.response.send_message("You are not part of this session.", ephemeral=True)
+            await ctx.send("You are not part of this session.", ephemeral=True)
             return
 
         # ensure both players have at least one ball
         if uid == sess["host"] and not sess["team_a"]:
-            await interaction.response.send_message("You must add at least one countryball before confirming.", ephemeral=True)
+            await ctx.send("You must add at least one countryball before confirming.", ephemeral=True)
             return
         if uid == sess["opponent"] and not sess["team_b"]:
-            await interaction.response.send_message("You must add at least one countryball before confirming.", ephemeral=True)
+            await ctx.send("You must add at least one countryball before confirming.", ephemeral=True)
             return
 
         sess["confirmed"][uid] = True
-        await interaction.response.send_message("You have confirmed. Waiting for the other player...", ephemeral=True)
+        await ctx.send("You have confirmed. Waiting for the other player...", ephemeral=True)
 
         # if both confirmed, run simulation
         if all(sess["confirmed"].values()):
@@ -379,7 +382,7 @@ class BattleSessionView(View):
             bio.seek(0)
             filename = f"battle_{session}.txt"
 
-            chan = interaction.channel
+            chan = ctx.channel
             await chan.send(file=discord.File(bio, filename=filename))
             # cleanup session
             del self._battle_sessions[session]
