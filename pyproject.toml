@@ -1,0 +1,113 @@
+[project]
+name = "ballsdex"
+version = "3.0.2"
+description = "Customizable Discord bot to collect and trade countryballs."
+authors = [
+    { name = 'Auguste "laggron42" Charpentier', email = "laggron42@ballsdex.com" },
+    { name = 'Jamie "flare" McGuinness', email = "flare@ballsdex.com" },
+]
+license = "MIT"
+license-files = [
+    "LICENSE"
+]
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    # asyncio
+    "uvloop==0.22.1; sys_platform != 'win32'",
+
+    # discord
+    "discord.py",
+
+    # django admin panel
+    "uvicorn[standard]==0.37.0",
+    "django==6.0.0",
+    "django-allow-cidr==0.8.0",
+    "django-nonrelated-inlines==0.2",
+    "django-admin-autocomplete-filter==0.7.1",
+    "django-admin-action-forms==2.2.0",
+    "django-admin-inline-paginator==0.4.0",
+    "dj-database-url==3.0.1",
+    "social-auth-app-django==5.6.0",
+    "psycopg[pool]==3.2.10",
+    "psycopg-binary==3.2.10",
+
+    # metrics
+    "prometheus-client==0.23.1",
+
+    # misc
+    "rich==14.2.0",
+    "python-dateutil>=2.9.0",
+    "Pillow==12.0.0",
+    "pyyaml==6.0.3",
+    "cachetools==6.2.1",
+    "sentry-sdk[django]==2.42.0",
+    "watchfiles==1.1.1",  # uvicorn dependency, needs version bump for 3.14
+]
+
+[project.optional-dependencies]
+dev = [
+    "pre-commit==4.3.0",
+    "ruff==0.14.1",
+    "pyright==1.1.406",
+    "django-debug-toolbar==6.0.0",
+    "pyinstrument==5.1.1",
+    "django-types",
+]
+docs = [
+    "griffe-generics>=1.0.13",
+    "griffe-modernized-annotations>=1.0.8",
+    "mkdocs>=1.6.1",
+    "mkdocs-git-revision-date-localized-plugin>=1.4.7",
+    "mkdocs-material>=9.6.14",
+    "mkdocstrings[python]>=0.29.1",
+]
+
+[project.scripts]
+ballsdex = "ballsdex.__main__:main"
+
+[tool.hatch.build.targets.sdist]
+exclude = ["result"]
+
+[tool.hatch.build.targets.wheel]
+only-include = ["ballsdex", "admin_panel"]
+sources = ["admin_panel"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv.sources]
+django-types = { git = "https://github.com/sbdchd/django-types.git", rev = "dadf37d11b2ea5517b5d5bfc51d9f93c649c5546" }
+"discord.py" = { git = "https://github.com/Rapptz/discord.py.git", rev = "c342db853486ef6e26d72b10bf901e951c4b4d8e" }
+
+[tool.ruff]
+line-length = 120
+indent-width = 4
+target-version = "py314"
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = true
+line-ending = "lf"
+docstring-code-format = true
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+ignore = ["E203"]
+exclude = ["admin_panel/admin_panel/settings/*"]
+
+[tool.ruff.lint.isort]
+# list all django modules
+known-first-party = ["ballsdex", "bd_models", "admin_panel", "preview", "settings", "users"]
+split-on-trailing-comma = false
+
+[tool.pyright]
+extraPaths = ["./admin_panel"]
+pythonVersion = "3.13"
+reportIncompatibleMethodOverride = "warning"
+reportIncompatibleVariableOverride = "warning"
+
+venvPath = "."
+venv = ".venv"

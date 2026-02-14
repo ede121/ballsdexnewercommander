@@ -1,0 +1,45 @@
+# Python stuff
+*.pyc
+__pycache__
+
+# macOS
+.DS_Store
+
+# Python binaries
+*.egg-info
+dist
+build
+
+# log files
+*.log*
+logs/*
+!logs/.gitkeep
+
+# Virtual environment
+venv
+.venv
+.python-version
+
+# database
+*sqlite3*
+*.rdb
+pgbackups
+
+# static
+static
+media
+
+# cache
+.pytest_cache
+
+# settings
+config.yml
+config/production.py
+config/extra.toml
+docker-compose.override.yml
+admin_panel/admin_panel/settings/production.py
+
+# extra package dev
+extra/*
+!extra/.gitkeep
+.gitmodules

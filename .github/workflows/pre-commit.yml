@@ -1,0 +1,35 @@
+name: Pre-commit
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  pre-commit:
+    runs-on: ubuntu-latest
+    name: pre-commit
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: pyproject.toml
+      - name: Install dependencies
+        run: uv sync --locked --all-extras --dev && echo "$PWD/.venv/bin" >> $GITHUB_PATH
+      - name: Check linter
+        run: ruff check --output-format=github
+      - name: Check formatter
+        run: ruff format --check --diff
+        # keep going even if previous failed
+        if: '!cancelled()'
+      - name: Check pyright
+        if: '!cancelled()'
+        uses: jakebailey/pyright-action@v2
+        with:
+          version: PATH
