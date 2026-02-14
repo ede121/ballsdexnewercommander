@@ -251,8 +251,9 @@ class BattleSessionView(View):
         """
         await ctx.send("Pong")
 
-    @app_commands.guilds()
-    @app_commands.command(name="start", description="Start a battle session against another player")
+    battle_group = app_commands.Group(name="battle", description="Battle commands")
+
+    @battle_group.command(name="start", description="Start a battle session against another player")
     @app_commands.describe(limit="Max countryballs per player (1-3)", opponent="Player to fight")
     async def slash_battle_start(self, interaction: discord.Interaction, limit: int = 3, opponent: discord.Member | None = None):
         if limit < 1 or limit > 3:
@@ -280,8 +281,7 @@ class BattleSessionView(View):
             ephemeral=False,
         )
 
-    @app_commands.guilds()
-    @app_commands.command(name="add", description="Add a countryball instance to an existing battle session")
+    @battle_group.command(name="add", description="Add a countryball instance to an existing battle session")
     @app_commands.describe(session="Battle session id", instance_id="BallInstance id to add")
     async def slash_battle_add(self, interaction: discord.Interaction, session: str, instance_id: int):
         sess = self._battle_sessions.get(session)
@@ -326,8 +326,7 @@ class BattleSessionView(View):
 
         await interaction.response.send_message(f"Added instance #{instance_id} to your team in session `{session}`.", ephemeral=True)
 
-    @app_commands.guilds()
-    @app_commands.command(name="confirm", description="Confirm your readiness for the battle session")
+    @battle_group.command(name="confirm", description="Confirm your readiness for the battle session")
     @app_commands.describe(session="Battle session id")
     async def slash_battle_confirm(self, interaction: discord.Interaction, session: str):
         sess = self._battle_sessions.get(session)
