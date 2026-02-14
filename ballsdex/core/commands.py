@@ -4,15 +4,18 @@ import time
 from typing import TYPE_CHECKING, cast
 
 import discord
+from discord import app_commands
 from asgiref.sync import sync_to_async
 from discord.ext import commands
 from django.db import connection
+from discord.ui import View, Modal, TextInput
 
 from ballsdex.core.dev import send_interactive
 from ballsdex.core.discord import LayoutView, View
 from ballsdex.core.utils.formatting import pagify
 from ballsdex.core.utils.menus import Menu, TextFormatter, TextSource
 from bd_models.models import Ball, BallInstance
+from bd_models.models import Player as DBPlayer, BattleRecord
 from settings.models import load_settings, settings
 
 log = logging.getLogger("ballsdex.core.commands")
@@ -46,6 +49,200 @@ class Core(commands.Cog):
 
     def __init__(self, bot: "BallsDexBot"):
         self.bot = bot
+        # in-memory battle sessions: session_id -> dict
+        self._battle_sessions: dict[str, dict] = {}
+
+    def _new_session_id(self) -> str:
+        return hex(int(time.time() * 1000))[-8:]
+
+    async def _get_player(self, user: discord.User) -> DBPlayer | None:
+        return await sync_to_async(DBPlayer.objects.filter(discord_id=user.id).first)()
+
+    async def _get_instance_display(self, instance_id: int) -> str:
+        try:
+            inst = await sync_to_async(BallInstance.objects.get)(pk=instance_id)
+            return inst.short_description()
+        except Exception:
+            return f"#{instance_id} (not found)"
+
+    async def _session_message_content(self, session: str) -> str:
+        sess = self._battle_sessions.get(session)
+        if not sess:
+            return "Session not found."
+
+        a_lines = []
+        for iid in sess["team_a"]:
+            a_lines.append(await self._get_instance_display(iid))
+        b_lines = []
+        for iid in sess["team_b"]:
+            b_lines.append(await self._get_instance_display(iid))
+
+        host_user = f"<@{sess['host']]}" if sess.get("host") else "Host"
+        opp_user = f"<@{sess['opponent']]}" if sess.get("opponent") else "Opponent"
+
+        content = (
+            f"Session `{session}` — Limit: {sess['limit']}\n"
+            f"Host: <@{sess['host']}>\n"
+            f"Opponent: <@{sess['opponent']}>\n\n"
+            f"Team A:\n" + ("\n".join(a_lines) if a_lines else "(empty)") + "\n\n"
+            f"Team B:\n" + ("\n".join(b_lines) if b_lines else "(empty)") + "\n\n"
+            "Use the buttons to add your balls (opens a dialog), confirm readiness, or cancel the session."
+        )
+        return content
+
+
+    async def _add_instance_to_session(self, sess: dict, user_id: int, instance_id: int) -> str:
+        # fetch instance
+        try:
+            inst = await sync_to_async(BallInstance.objects.get)(pk=instance_id)
+        except Exception:
+            return "BallInstance not found."
+
+        if inst.player.discord_id != user_id:
+            return "You do not own that countryball instance."
+
+        if user_id == sess["host"]:
+            team = sess["team_a"]
+        else:
+            team = sess["team_b"]
+
+        if len(team) >= sess["limit"]:
+            return f"Your team already has the maximum of {sess['limit']} balls."
+
+        if instance_id in sess["team_a"] or instance_id in sess["team_b"]:
+            return "This instance is already added to the session."
+
+        team.append(instance_id)
+        sess["confirmed"][sess["host"]] = False
+        sess["confirmed"][sess["opponent"]] = False
+        return f"Added instance #{instance_id} to your team."
+
+
+class AddInstanceModal(Modal):
+    def __init__(self, session: str, cog: Core):
+        super().__init__(title="Add Countryball")
+        self.session = session
+        self.cog = cog
+        self.instance_id = TextInput(label="Instance ID", placeholder="Enter BallInstance id", required=True)
+        self.add_item(self.instance_id)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        inst_val = int(self.instance_id.value.strip())
+        sess = self.cog._battle_sessions.get(self.session)
+        if not sess:
+            await interaction.response.send_message("Session not found.", ephemeral=True)
+            return
+
+        res = await self.cog._add_instance_to_session(sess, interaction.user.id, inst_val)
+        await interaction.response.send_message(res, ephemeral=True)
+        # update the session message if present
+        # try to edit original message in channel
+        try:
+            # find message by storing message id in session (optional)
+            msg_id = sess.get("message_id")
+            if msg_id:
+                chan = interaction.channel
+                content = await self.cog._session_message_content(self.session)
+                try:
+                    await chan.fetch_message(msg_id)
+                    await chan.send("(updated)")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+
+class BattleSessionView(View):
+    def __init__(self, session: str, cog: Core):
+        super().__init__(timeout=None)
+        self.session = session
+        self.cog = cog
+
+    @discord.ui.button(label="Add my ball", style=discord.ButtonStyle.primary)
+    async def add_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        sess = self.cog._battle_sessions.get(self.session)
+        if not sess:
+            await interaction.response.send_message("Session not found.", ephemeral=True)
+            return
+        if interaction.user.id not in (sess["host"], sess["opponent"]):
+            await interaction.response.send_message("You are not part of this session.", ephemeral=True)
+            return
+
+        await interaction.response.send_modal(AddInstanceModal(self.session, self.cog))
+
+    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.success)
+    async def confirm_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        sess = self.cog._battle_sessions.get(self.session)
+        if not sess:
+            await interaction.response.send_message("Session not found.", ephemeral=True)
+            return
+        uid = interaction.user.id
+        if uid not in (sess["host"], sess["opponent"]):
+            await interaction.response.send_message("You are not part of this session.", ephemeral=True)
+            return
+
+        # ensure user has at least one ball
+        if uid == sess["host"] and not sess["team_a"]:
+            await interaction.response.send_message("You must add at least one countryball before confirming.", ephemeral=True)
+            return
+        if uid == sess["opponent"] and not sess["team_b"]:
+            await interaction.response.send_message("You must add at least one countryball before confirming.", ephemeral=True)
+            return
+
+        sess["confirmed"][uid] = True
+        await interaction.response.send_message("You have confirmed. Waiting for the other player...", ephemeral=True)
+
+        if all(sess["confirmed"].values()):
+            # run battle same as confirm command
+            a_ids = sess["team_a"]
+            b_ids = sess["team_b"]
+            a_list = [await sync_to_async(BallInstance.objects.get)(pk=i) for i in a_ids]
+            b_list = [await sync_to_async(BallInstance.objects.get)(pk=i) for i in b_ids]
+
+            from ballsdex.core.battle import TeamBattle
+
+            battle = TeamBattle(a_list, b_list)
+            logs = battle.run()
+            text = "\n".join(logs)
+            # save and send file
+            try:
+                await sync_to_async(BattleRecord.objects.create)(team_a={"ids": a_ids}, team_b={"ids": b_ids}, log=text, winner=("A" if any(p.current_hp>0 for p in battle.team_a) and not any(p.current_hp>0 for p in battle.team_b) else ("B" if any(p.current_hp>0 for p in battle.team_b) and not any(p.current_hp>0 for p in battle.team_a) else "draw")))
+            except Exception:
+                log.exception("Failed to persist BattleRecord")
+
+            import io
+
+            bio = io.BytesIO()
+            bio.write(text.encode("utf-8"))
+            bio.seek(0)
+            filename = f"battle_{self.session}.txt"
+            chan = interaction.channel
+            await chan.send(file=discord.File(bio, filename=filename))
+            # cleanup
+            try:
+                del self.cog._battle_sessions[self.session]
+            except Exception:
+                pass
+
+    @discord.ui.button(label="Refresh", style=discord.ButtonStyle.secondary)
+    async def refresh_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        content = await self.cog._session_message_content(self.session)
+        try:
+            await interaction.response.edit_message(content=content, view=self)
+        except Exception:
+            await interaction.response.send_message(content, ephemeral=True)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger)
+    async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        sess = self.cog._battle_sessions.get(self.session)
+        if not sess:
+            await interaction.response.send_message("Session not found.", ephemeral=True)
+            return
+        if interaction.user.id not in (sess["host"], sess["opponent"]):
+            await interaction.response.send_message("Only participants can cancel the session.", ephemeral=True)
+            return
+        del self.cog._battle_sessions[self.session]
+        await interaction.response.send_message("Session cancelled.", ephemeral=False)
 
     @commands.command()
     async def ping(self, ctx: commands.Context):
@@ -53,6 +250,140 @@ class Core(commands.Cog):
         Ping!
         """
         await ctx.send("Pong")
+
+    @app_commands.guilds()
+    @app_commands.command(name="start", description="Start a battle session against another player")
+    @app_commands.describe(limit="Max countryballs per player (1-3)", opponent="Player to fight")
+    async def slash_battle_start(self, interaction: discord.Interaction, limit: int = 3, opponent: discord.Member | None = None):
+        if limit < 1 or limit > 3:
+            await interaction.response.send_message("Limit must be between 1 and 3.", ephemeral=True)
+            return
+
+        if opponent is None:
+            await interaction.response.send_message("You must specify an opponent.", ephemeral=True)
+            return
+
+        session_id = self._new_session_id()
+        self._battle_sessions[session_id] = {
+            "host": interaction.user.id,
+            "opponent": opponent.id,
+            "limit": limit,
+            "team_a": [],
+            "team_b": [],
+            "confirmed": {interaction.user.id: False, opponent.id: False},
+            "channel": interaction.channel_id,
+        }
+
+        await interaction.response.send_message(
+            f"Battle session `{session_id}` started between {interaction.user.mention} and {opponent.mention}.\n"
+            f"Each player may add up to {limit} countryballs with `/battle add {session_id} <instance_id>`.",
+            ephemeral=False,
+        )
+
+    @app_commands.guilds()
+    @app_commands.command(name="add", description="Add a countryball instance to an existing battle session")
+    @app_commands.describe(session="Battle session id", instance_id="BallInstance id to add")
+    async def slash_battle_add(self, interaction: discord.Interaction, session: str, instance_id: int):
+        sess = self._battle_sessions.get(session)
+        if not sess:
+            await interaction.response.send_message("Session not found.", ephemeral=True)
+            return
+
+        uid = interaction.user.id
+        if uid not in (sess["host"], sess["opponent"]):
+            await interaction.response.send_message("You are not part of this session.", ephemeral=True)
+            return
+
+        # fetch BallInstance and check ownership
+        try:
+            inst = await sync_to_async(BallInstance.objects.get)(pk=instance_id)
+        except Exception:
+            await interaction.response.send_message("BallInstance not found.", ephemeral=True)
+            return
+
+        player = await self._get_player(interaction.user)
+        if not player or inst.player.discord_id != interaction.user.id:
+            await interaction.response.send_message("You do not own that countryball instance.", ephemeral=True)
+            return
+
+        # determine which team to add to
+        if uid == sess["host"]:
+            team = sess["team_a"]
+        else:
+            team = sess["team_b"]
+
+        if len(team) >= sess["limit"]:
+            await interaction.response.send_message(f"Your team already has the maximum of {sess['limit']} balls.", ephemeral=True)
+            return
+
+        if instance_id in sess["team_a"] or instance_id in sess["team_b"]:
+            await interaction.response.send_message("This instance is already added to the session.", ephemeral=True)
+            return
+
+        team.append(instance_id)
+        sess["confirmed"][sess["host"]] = False
+        sess["confirmed"][sess["opponent"]] = False
+
+        await interaction.response.send_message(f"Added instance #{instance_id} to your team in session `{session}`.", ephemeral=True)
+
+    @app_commands.guilds()
+    @app_commands.command(name="confirm", description="Confirm your readiness for the battle session")
+    @app_commands.describe(session="Battle session id")
+    async def slash_battle_confirm(self, interaction: discord.Interaction, session: str):
+        sess = self._battle_sessions.get(session)
+        if not sess:
+            await interaction.response.send_message("Session not found.", ephemeral=True)
+            return
+
+        uid = interaction.user.id
+        if uid not in (sess["host"], sess["opponent"]):
+            await interaction.response.send_message("You are not part of this session.", ephemeral=True)
+            return
+
+        # ensure both players have at least one ball
+        if uid == sess["host"] and not sess["team_a"]:
+            await interaction.response.send_message("You must add at least one countryball before confirming.", ephemeral=True)
+            return
+        if uid == sess["opponent"] and not sess["team_b"]:
+            await interaction.response.send_message("You must add at least one countryball before confirming.", ephemeral=True)
+            return
+
+        sess["confirmed"][uid] = True
+        await interaction.response.send_message("You have confirmed. Waiting for the other player...", ephemeral=True)
+
+        # if both confirmed, run simulation
+        if all(sess["confirmed"].values()):
+            # load instances
+            a_ids = sess["team_a"]
+            b_ids = sess["team_b"]
+            a_list = [await sync_to_async(BallInstance.objects.get)(pk=i) for i in a_ids]
+            b_list = [await sync_to_async(BallInstance.objects.get)(pk=i) for i in b_ids]
+
+            from ballsdex.core.battle import TeamBattle
+
+            battle = TeamBattle(a_list, b_list)
+            logs = battle.run()
+
+            text = "\n".join(logs)
+
+            # save BattleRecord
+            try:
+                await sync_to_async(BattleRecord.objects.create)(team_a={"ids": a_ids}, team_b={"ids": b_ids}, log=text, winner=("A" if any(p.current_hp>0 for p in battle.team_a) and not any(p.current_hp>0 for p in battle.team_b) else ("B" if any(p.current_hp>0 for p in battle.team_b) and not any(p.current_hp>0 for p in battle.team_a) else "draw")))
+            except Exception:
+                log.exception("Failed to persist BattleRecord")
+
+            # send as txt file to channel
+            import io
+
+            bio = io.BytesIO()
+            bio.write(text.encode("utf-8"))
+            bio.seek(0)
+            filename = f"battle_{session}.txt"
+
+            chan = interaction.channel
+            await chan.send(file=discord.File(bio, filename=filename))
+            # cleanup session
+            del self._battle_sessions[session]
 
     @commands.command()
     async def battle(self, ctx: commands.Context, *ids: int):
