@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING
 from discord import app_commands
 
 from .cog import Admin
+from .battle_commands import BattleCog
 
 if TYPE_CHECKING:
     from ballsdex.core.bot import BallsDexBot
@@ -41,3 +42,4 @@ async def setup(bot: "BallsDexBot"):
         strip_descriptions(n)
         log.warn("/admin command too long, stripping descriptions.")
     await bot.add_cog(n)
+    await bot.add_cog(BattleCog(bot))
