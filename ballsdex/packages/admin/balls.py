@@ -647,5 +647,3 @@ async def battle(ctx: commands.Context, *ids: int):
     text = "\n".join(logs)
     pages = pagify(text, delims=["\n\n", "\n"], priority=True)
     await send_interactive(ctx, pages, block=None)
-async def setup(bot: "BallsDexBot"):
-    await bot.add_cog(BattleCog(bot))
